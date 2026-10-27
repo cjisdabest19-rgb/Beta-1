@@ -103,6 +103,17 @@ def save_json(path: Path, data):
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def _is_local_command(text: str) -> bool:
+    cleaned = text.strip()
+    low = cleaned.lower()
+    return (
+        low in {"/help", "help"}
+        or low.startswith("/calc")
+        or low.startswith("/study")
+        or low.startswith("/summarize")
+    )
+
+
 def local_reply(text: str) -> str:
     """Predictable offline helpers; not a substitute for a language model."""
     cleaned = text.strip()
@@ -168,31 +179,140 @@ def local_reply(text: str) -> str:
     )
 
 
+def _describe_api_error(code: int, body_text: str) -> str:
+    """Create a clear, safe explanation for provider-side HTTP failures."""
+    safe_body = (body_text or "").strip()
+    lowered = safe_body.lower()
+
+    if code == 401:
+        return (
+            "Authentication failed (HTTP 401). Your ECHO_API_KEY may be missing, expired, "
+            "invalid for the selected provider, or the endpoint does not accept that key. "
+            "Check the key and provider configuration."
+        )
+    if code == 403:
+        if "cloudflare" in lowered or "1010" in lowered or "challenge" in lowered:
+            return (
+                "Access is blocked by a provider or network policy (HTTP 403 / Cloudflare 1010). "
+                "This often means the endpoint is behind a WAF challenge, the URL is wrong, or the account "
+                "is not allowed to call that service from this environment. Check ECHO_API_URL and "
+                "ECHO_API_KEY, and confirm the provider allows requests from this machine."
+            )
+        return (
+            "Access forbidden (HTTP 403). This can mean the key is invalid, the model is unavailable, "
+            "the account lacks permission, or the configured ECHO_API_URL is not an OpenAI-compatible endpoint."
+        )
+    if code == 404:
+        return (
+            "Endpoint not found (HTTP 404). Check that ECHO_API_URL points to a valid OpenAI-compatible "
+            "chat completions path for your provider."
+        )
+    if code == 429:
+        return (
+            "Rate limit reached or quota exceeded (HTTP 429). Your API account may be out of credits, "
+            "rate-limited, or restricted by provider policy."
+        )
+    if 500 <= code < 600:
+        return (
+            f"Provider server error (HTTP {code}). The model service may be temporarily unavailable. "
+            "Retry later or confirm the endpoint is healthy."
+        )
+    if safe_body:
+        return f"Request failed (HTTP {code}). Provider response: {safe_body[:220]}"
+    return f"Request failed (HTTP {code}). Check your API configuration and provider status."
+
+
+def _read_error_body(exc: urllib.error.HTTPError) -> str:
+    try:
+        return exc.read().decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _clean_provider_error(detail: str) -> str:
+    stripped = detail.strip()
+    if not stripped:
+        return ""
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return stripped[:300]
+
+    if isinstance(parsed, dict):
+        error = parsed.get("error")
+        if isinstance(error, dict):
+            for key in ("message", "type", "code"):
+                value = error.get(key)
+                if value:
+                    return str(value)[:300]
+        for key in ("message", "detail", "error"):
+            value = parsed.get(key)
+            if isinstance(value, str):
+                return value[:300]
+            if isinstance(value, list) and value:
+                first = value[0]
+                if isinstance(first, dict):
+                    for subkey in ("message", "detail"):
+                        if first.get(subkey):
+                            return str(first[subkey])[:300]
+    return stripped[:300]
+
+
 def call_model(messages: list[dict]) -> str:
+    if not messages:
+        return "No messages available."
+
+    user_text = ""
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            user_text = str(message.get("content", "")).strip()
+            if user_text:
+                break
+
+    if user_text and _is_local_command(user_text):
+        return local_reply(user_text)
+
     if not API_KEY:
-        return local_reply(messages[-1]["content"])
+        return local_reply(user_text or messages[-1].get("content", ""))
+
     payload = {
         "model": DEFAULT_MODEL,
         "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages[-20:],
         "temperature": 0.4,
     }
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Echo-Beta1/1.0 (+https://github.com/cjisdabest19-rgb/Beta-1; python-urllib)",
+        "Authorization": f"Bearer {API_KEY}",
+    }
     request = urllib.request.Request(
         DEFAULT_API_URL,
         data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {API_KEY}",
-        },
+        headers=headers,
         method="POST",
     )
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
             data = json.loads(response.read().decode("utf-8"))
-        return data["choices"][0]["message"]["content"].strip()
+        if not isinstance(data, dict):
+            raise ValueError("Unexpected API response format.")
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise KeyError("No choices returned by the model endpoint.")
+        message = choices[0].get("message", {})
+        content = message.get("content")
+        if not content:
+            raise KeyError("Model response did not include text content.")
+        return str(content).strip()
     except urllib.error.HTTPError as exc:
-        details = exc.read().decode("utf-8", errors="replace")[:500]
-        return f"Model API error ({exc.code}): {details}"
-    except (urllib.error.URLError, TimeoutError, KeyError, IndexError, json.JSONDecodeError) as exc:
+        raw_text = _read_error_body(exc)
+        safe_detail = _clean_provider_error(raw_text)
+        summary = _describe_api_error(exc.code, safe_detail or raw_text)
+        if safe_detail:
+            return f"Model API error: {summary} Details: {safe_detail}"
+        return f"Model API error: {summary}"
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError, IndexError, json.JSONDecodeError) as exc:
         return f"Could not reach the model API: {exc}"
 
 
