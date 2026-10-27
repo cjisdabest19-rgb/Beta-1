@@ -1,1 +1,17 @@
 # Uses Python standard library only; Tkinter must be available in your Python installation.
+
+
+Inspect the existing Beta 1 project, especially Echo_Beta_1/echo_beta1.py, and fix the API integration problems.
+
+Requirements:
+
+1. Investigate why requests to the Groq OpenAI-compatible API endpoint return HTTP 403 with Cloudflare error 1010. Do not assume the cause without evidence.
+2. Improve API error messages so they help diagnose configuration, authentication, rate-limit, and provider-access problems without exposing API keys.
+3. Add a reasonable descriptive User-Agent header to API requests as a diagnostic test.
+4. Fix command routing so /help, /calc, /study, and /summarize use their local implementations even when an API key is configured.
+5. Preserve the existing Tkinter interface, notes, history, calculator, and other working features.
+6. Check for syntax errors and run any appropriate tests.
+7. Do not hard-code API keys or commit secrets.
+8. Explain every change and give me the exact commands to run Beta 1 afterward.
+
+Do not rewrite the entire project unnecessarily. Inspect the existing code first, then make focused changes. A code change may not resolve a provider-side Cloudflare block, so explain any remaining issue honestly.
