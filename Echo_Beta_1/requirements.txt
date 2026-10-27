@@ -1,0 +1,1 @@
+# Uses Python standard library only; Tkinter must be available in your Python installation.
